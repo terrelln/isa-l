@@ -32,7 +32,7 @@
 %include "data_struct2.asm"
 %include "huffman.asm"
 
-
+;;NICK Implementation for AVX256
 %define USE_HSWNI
 %define ARCH 04
 
@@ -253,20 +253,28 @@ func(gen_icf_map_lh1_04)
 	add	f_i, 1
 
 ;;hash
+;;NICK: Load the next 32 bytes into datas
 	vmovdqu datas, [f_i + file_start]
+;;NICK: Get two copies of [0-16, 0-16]
 	vpermq	yhashes, datas, 0x44
+;;NICK: Load the first 8 4-byte data elements [ 0123 | 1234 | 2345 | 3456 | 4567 | 5678 | 6789 | 789a ]
 	vpshufb	yhashes, yhashes, [datas_shuf]
+;;NICK: Compute the 8 hashes
 	vpmaddwd yhashes, yhashes, yhash_prod
 	vpmaddwd yhashes, yhashes, yhash_prod
 	vpand	yhashes, yhashes, yhash_mask
-
+;;NICK: Get two copies of [0-16, 0-16]
 	vpermq	ylookup, datas, 0x44
+;;NICK: Get the first 4 8-byte data elements [ 0123457 | 1234568 | 23456789 | 3456789a ]
 	vmovdqu	yqword_shuf, [qword_shuf]
 	vpshufb	ylookup, ylookup, yqword_shuf
+;;NICK: Get two copies of [4-20, 4-20]
 	vpermd	ylookup2, ydatas_perm2, datas
+;;NICK: Get the second 4 8-byte data elements [ 456789ab | 56789abc | 6789abcd | 789abcde ]
 	vpshufb	ylookup2, ylookup2, yqword_shuf
 
 ;;gather/scatter hashes
+;;NICK: Get the 8 hash table entries into ydists_lookup
 	vpcmpeqq ytmp, ytmp, ytmp
 	vpgatherdd ydists_lookup, [hash_table + HASH_BYTES * yhashes], ytmp
 
