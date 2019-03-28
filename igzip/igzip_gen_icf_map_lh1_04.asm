@@ -497,7 +497,7 @@ func(gen_icf_map_lh1_04)
 ;; Compute match length
 
 ;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;NICK: Computes match lengths
+;;NICK: Computes match lengths into ylens1
 ;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 ;;NICK: Transform matches to 0xff, and differences to 0x00
@@ -506,11 +506,11 @@ func(gen_icf_map_lh1_04)
 	vpcmpeqb ylens2, ylens2, ytmp
 ;;NICK: 0x01 0x02 0x04 0x08 0x10 0x20 0x40 0x80
 	vpbroadcastq yshift_finish, [shift_finish]
-;;NICK: Map matches to 0x00 and differences to the index bit
+;;NICK: Map matches to the index bit and differences to 0x00
 	vpand	ylens1, ylens1, yshift_finish
 	vpand	ylens2, ylens2, yshift_finish
-;;NICK: Get a 1-byte bitmap for the matches 0x00 = match. 0x01 = no match.
-;;NICK: 0x02 = 1-byte, ..., 0x80 = 7-byte match.
+;;NICK: Get a 1-byte bitmap for the matches.
+;;NICK: 0xff = 8 byte match. 0x01 = 1 byte match. 0x00 = no match
 	vpsadbw ylens1, ylens1, ytmp
 	vpsadbw ylens2, ylens2, ytmp
 ;;NICK: Get the 4 match bitmap bytes into the first and last 2 4-byte registers
@@ -526,16 +526,21 @@ func(gen_icf_map_lh1_04)
 ;;NICK: Put the first 128-bits of ylens2 into the last 128-bits of ylens1.
 ;;NICK: Now we have all 8 match bitmaps in a single register.
 	vinserti128 ylens1, ylens1, ylens2 %+ x, 1
-
+;;NICK: Get only the high 4-bits of the bitmask in the lowest 4 bits
 	vpbroadcastd ytmp, [low_nibble]
 	vpsrld	ylens2, ylens1, 4
 	vpand	ylens1, ylens1, ytmp
+;;NICK: Load in the constants we need
 	vbroadcasti128	ytmp, [match_cnt_perm]
 	vpbroadcastd ytmp2, [match_cnt_low_max]
+;;NICK: Count the number of leading 1s (number of matching bytes) in each vector.
 	vpshufb	ylens1, ytmp, ylens1
 	vpshufb	ylens2, ytmp, ylens2
+;;NICK: We must have all 4 bytes match in ylens1 to continue to ylens2.
+;;NICK: If they don't match mask them off.
 	vpcmpeqb ytmp, ylens1, ytmp2
 	vpand	ylens2, ylens2, ytmp
+;;NICK: Compute the final match lengths
 	vpaddd	ylens1, ylens1, ylens2
 
 ;; Preload for next loops
@@ -543,38 +548,64 @@ func(gen_icf_map_lh1_04)
 	vmovdqu datas_lookup, [f_i + file_start + 2 * VECT_SIZE]
 
 ;; Zero out matches which should not be taken
+
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;NICK: Selects matches >= 4 bytes and if the next match isn't longer.
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;NICK: NOTE: This is diferent than the base implementation. The base
+;;NICK        implementation selects length 3 matches and doesn't check if the
+;;NICK        next match is longer.
+;;NICK: Rotate: move the last register to the first and shift.
 	vmovdqu yrot_left, [drot_left]
 	vpermd	ylens2, yrot_left, ylens1
 	vpermd	ydists, yrot_left, ydists
-
+;;NICK: Swap prev_len and the length of the last match.
 	vpinsrd ytmp %+ x, ylens2 %+ x, prev_len %+ d, 0
 	vmovd	prev_len %+ d, ylens2 %+ x
 	vinserti128 ylens2, ylens2, ytmp %+ x, 0
-
+;;NICK: Swap prev_dist and the distance of the last match.
 	vpinsrd ytmp %+ x, ydists %+ x, prev_dist %+ d, 0
 	vmovd	prev_dist %+ d, ydists %+ x
 	vinserti128 ydists, ydists, ytmp %+ x, 0
 
+;;NICK: ytmp = 0xffffffff if ylens2 is > 3.
 	vpbroadcastd ytmp, [shortest_matches]
 	vpcmpgtd ytmp, ylens2, ytmp
+;;NICK: ytmp2 = 0xffffffff if the match is longer than the previous match
 	vpcmpgtd ytmp2, ylens1, ylens2
 
 	vpcmpeqd ytmp3, ytmp3, ytmp3
+;;NICK: ytmp = 0xffffffff if ylens2 is <= 3.
 	vpxor	ytmp, ytmp, ytmp3
+;;NICK: ytmp = 0xffffffff if the next match is longer than the current match or
+;;NICK: the current match is <= 3.
+;;NICK: ytmp = 0xffffffff if we don't want to take this match.
 	vpor	ytmp, ytmp, ytmp2
-
+;;NICK: (~ytmp) & ylens2: Keep only the matches we want.
 	vpandn	ylens1, ytmp, ylens2
 
-;; Update zdists to match ylens1
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;NICK: Finalize the match codes, and set literal codes for non-matches.
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; Update ydists to match ylens1
 	vpbroadcastd ytmp2, [twofiftyfour]
+;;NICK: Add the match lengths to the distances?
 	vpaddd	ydists, ydists, ylens1
+;;NICK: Add 254 to the distances.
 	vpaddd	ydists, ydists, ytmp2
 
+;;NICK: Load the literal symbols?
 	vpbroadcastd ynull_syms, [null_dist_syms]
+;;NICK: Set the literals
 	vpmovzxbd ytmp3, [f_i + file_start - VECT_SIZE - 1]
 	vpaddd	ytmp3, ynull_syms
+;;NICK: The literals are only the skipped matches
 	vpand	ytmp3, ytmp3, ytmp
+;;NICK: (~ytmp) & ydists: Keep only the codes for the matches we want to keep.
 	vpandn	ydists, ytmp, ydists
+;;NICK: OR in the literals codes. We now have our codes in ydists.
 	vpor	ydists, ydists, ytmp3
 
 ;;Store ydists
@@ -808,6 +839,6 @@ low_word:
 low_nibble:
 	db 0x0f, 0x0f, 0x0f, 0x0f
 match_cnt_low_max:
-	dd 0x4
+	d  d 0x4
 base_offset:
 	db -0x2, 0x2, 0x6, 0xa
