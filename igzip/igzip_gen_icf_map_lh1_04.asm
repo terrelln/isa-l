@@ -253,6 +253,11 @@ func(gen_icf_map_lh1_04)
 	add	f_i, 1
 
 ;;hash
+
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;NICK: Computes the 8 4-byte hashes in yhashes
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 ;;NICK: Load the next 32 bytes into datas
 	vmovdqu datas, [f_i + file_start]
 ;;NICK: Get two copies of [0-16, 0-16]
@@ -263,6 +268,11 @@ func(gen_icf_map_lh1_04)
 	vpmaddwd yhashes, yhashes, yhash_prod
 	vpmaddwd yhashes, yhashes, yhash_prod
 	vpand	yhashes, yhashes, yhash_mask
+
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;NICK: Loads the first 8 8-byte sequences into ylookup and ylookup2
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
 ;;NICK: Get two copies of [0-16, 0-16]
 	vpermq	ylookup, datas, 0x44
 ;;NICK: Get the first 4 8-byte data elements [ 0123457 | 1234568 | 23456789 | 3456789a ]
@@ -274,19 +284,33 @@ func(gen_icf_map_lh1_04)
 	vpshufb	ylookup2, ylookup2, yqword_shuf
 
 ;;gather/scatter hashes
-;;NICK: Get the 8 hash table entries into ydists_lookup
+
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;NICK: Update the hash table with the 8 new positions
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;NICK: Get the 8 hash table entries into ydists_lookup.
+;;NICK: Note that only the first 2 bytes are valid (little-endian).
 	vpcmpeqq ytmp, ytmp, ytmp
 	vpgatherdd ydists_lookup, [hash_table + HASH_BYTES * yhashes], ytmp
-
+;;NICK: [ ffff 0000 | ... | ffff 0000 ]
 	vpbroadcastd ytmp2, [upper_word]
+;;NICK: [ 0000 ffff | ... | 0000 ffff ]
 	vpbroadcastd ytmp, [low_word]
+;;NICK: Load the low 32-bits of f_i into each 4-byte register of yindex
 	vmovd	yindex %+ x, f_i %+ d
 	vpbroadcastd yindex, yindex %+ x
+;;NICK: Get the index for position 0 through position 7 in each 4-byte register.
 	vpaddd	yindex, yindex, yincrement
+;;NICK: Mask out the bytes that we will replace (write back the other positions)
 	vpand	yscatter, ydists_lookup, ytmp2
+;;NICK: Get the low two bytes of the indices
  	vpand ytmp, yindex, ytmp
+;;NICK: OR the low two bytes of the indices with the high two bytes from table
+;;NICK: We are writing 2-bytes, so we have to put back the other two bytes
 	vpor	yscatter, yscatter, ytmp
 
+;;NICK: Write the first 4 positions into the hash table
 	vmovd tmp %+ d, yhashes %+ x
 	vmovd [hash_table + HASH_BYTES * tmp], yscatter %+ x
 	vpextrd tmp %+ d, yhashes %+ x, 1
@@ -299,6 +323,7 @@ func(gen_icf_map_lh1_04)
 	vextracti128 yscatter %+ x, yscatter, 1
 	vextracti128 yhashes %+ x, yhashes, 1
 
+;;NICK: Write the second 4 positions into the hash table
 	vmovd tmp %+ d, yhashes %+ x
 	vmovd [hash_table + HASH_BYTES * tmp], yscatter %+ x
 	vpextrd tmp %+ d, yhashes %+ x, 1
@@ -309,6 +334,10 @@ func(gen_icf_map_lh1_04)
 	vpextrd [hash_table + HASH_BYTES * tmp], yscatter %+ x, 3
 
 ;; Compute hash for next loop
+
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;NICK: Computes the next 8 4-byte hashes in yhashes
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 	vpbroadcastd	yhash_prod, [hash_prod]
 	vpbroadcastd	yhash_mask, [rsp + hash_mask_offset]
 	vmovdqu datas, [f_i + file_start + VECT_SIZE]
@@ -318,29 +347,41 @@ func(gen_icf_map_lh1_04)
 	vpmaddwd yhashes, yhashes, yhash_prod
 	vpand	yhashes, yhashes, yhash_mask
 
+;;NICK: Save bytes [16-23]
 	vmovdqu datas_lookup, [f_i + file_start + 2 * VECT_SIZE]
 
+;;NICK: Subtract off 8 bytes from the end
 	sub	f_i_end, VECT_SIZE
 	cmp	f_i, f_i_end
 	jg	.loop1_end
 
 .loop1:
+;;NICK: Get the next input pointer
 	lea	next_in, [f_i + file_start]
 
 ;; Calculate look back dists
+;;NICK: Load the masks from the state. How are these masks set?
 	vpbroadcastd ydist_mask, [rsp + dist_mask_offset]
+;;NICK: Add one to each ydists_lookup. Why?
 	vpaddd	ydists, ydists_lookup, yones
+;;NICK: Compute the offsets to each of the potential matches and mask for safety
 	vpsubd	ydists, yindex, ydists
 	vpand	ydists, ydists, ydist_mask
+;;NICK: Undo the one that we add
 	vpaddd	ydists, ydists, yones
+;;NICK: Negate and remove the increments from yindex to get the distance from
+;;NICK: the current position (f_i).
 	vpsubd	ydists, yincrement, ydists
 
 ;;gather/scatter hashes
+;;NICK: Increment our current pointer.
 	add	f_i, VECT_SIZE
 
+;;NICK: Look up the hash table entries
 	vpcmpeqq ytmp, ytmp, ytmp
 	vpgatherdd ydists_lookup, [hash_table + HASH_BYTES * yhashes], ytmp
 
+;;NICK Prepare the hash table update
 	vpbroadcastd ytmp2, [upper_word]
 	vpbroadcastd ytmp, [low_word]
 	vmovd	yindex %+ x, f_i %+ d
@@ -350,6 +391,7 @@ func(gen_icf_map_lh1_04)
 	vpand ytmp, yindex, ytmp
 	vpor	yscatter, yscatter, ytmp
 
+;;NICK: Update the hash table
 	vmovd tmp %+ d, yhashes %+ x
 	vmovd [hash_table + HASH_BYTES * tmp], yscatter %+ x
 	vpextrd tmp %+ d, yhashes %+ x, 1
@@ -381,6 +423,8 @@ func(gen_icf_map_lh1_04)
 	vpand	yhashes, yhashes, yhash_mask
 
 ;;lookup old codes
+;;NICK: Lookup 8-bytes for each of the 8 hashes into ylens1 and ylens2.
+;;NICK: We will compare this to ylookup and ylookup2.
 	vextracti128 ydists2 %+ x, ydists, 1
 
 	vpcmpeqq ytmp, ytmp, ytmp
@@ -389,9 +433,11 @@ func(gen_icf_map_lh1_04)
 	vpgatherdq ylens2, [next_in + ydists2 %+ x], ytmp
 
 ;; Calculate dist_icf_code
+;;NICK: Recompute the offsets from by adding one and increment (maybe +1?).
 	vpaddd	ydists, ydists, yones
 	vpsubd	ydists, yincrement, ydists
 
+;;NICK: Compute the codes?
 	vpbroadcastd ytmp2, [low_nibble]
 	vbroadcasti128 ytmp3, [nibble_order]
 	vpslld	ydist_extra, ydists, 12
@@ -436,10 +482,12 @@ func(gen_icf_map_lh1_04)
 	vpslld	ydists, ydists, DIST_OFFSET
 
 ;; xor current data with lookback dist
+;;NICK: Zero means match (similar to the compare() functions)
 	vpxor	ylens1, ylens1, ylookup
 	vpxor	ylens2, ylens2, ylookup2
 
 ;; Setup registers for next loop
+;;NICK: We no longer need ylookup, so save the values for the next loop.
 	vpermq	ylookup, datas, 0x44
 	vmovdqu	yqword_shuf, [qword_shuf]
 	vpshufb	ylookup, ylookup, yqword_shuf
@@ -447,22 +495,38 @@ func(gen_icf_map_lh1_04)
 	vpshufb	ylookup2, ylookup2, yqword_shuf
 
 ;; Compute match length
+
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;NICK: Computes match lengths
+;;NICK:;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;NICK: Transform matches to 0xff, and differences to 0x00
 	vpxor	ytmp, ytmp, ytmp
 	vpcmpeqb ylens1, ylens1, ytmp
 	vpcmpeqb ylens2, ylens2, ytmp
+;;NICK: 0x01 0x02 0x04 0x08 0x10 0x20 0x40 0x80
 	vpbroadcastq yshift_finish, [shift_finish]
+;;NICK: Map matches to 0x00 and differences to the index bit
 	vpand	ylens1, ylens1, yshift_finish
 	vpand	ylens2, ylens2, yshift_finish
+;;NICK: Get a 1-byte bitmap for the matches 0x00 = match. 0x01 = no match.
+;;NICK: 0x02 = 1-byte, ..., 0x80 = 7-byte match.
 	vpsadbw ylens1, ylens1, ytmp
 	vpsadbw ylens2, ylens2, ytmp
+;;NICK: Get the 4 match bitmap bytes into the first and last 2 4-byte registers
 	vmovdqu ydownconvert_qd, [downconvert_qd]
 	vpshufb	ylens1, ylens1, ydownconvert_qd
+;;NICK: Map those 4 4-byte registers into the first 128-bits of ylens1
 	vextracti128 ytmp %+ x, ylens1, 1
 	vpor	ylens1, ylens1, ytmp
+;;NICK: Do the same for ylens2
 	vpshufb	ylens2, ylens2, ydownconvert_qd
 	vextracti128 ytmp %+ x, ylens2, 1
 	vpor	ylens2, ylens2, ytmp
+;;NICK: Put the first 128-bits of ylens2 into the last 128-bits of ylens1.
+;;NICK: Now we have all 8 match bitmaps in a single register.
 	vinserti128 ylens1, ylens1, ylens2 %+ x, 1
+
 	vpbroadcastd ytmp, [low_nibble]
 	vpsrld	ylens2, ylens1, 4
 	vpand	ylens1, ylens1, ytmp
